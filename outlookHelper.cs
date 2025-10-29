@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using Ical.Net.CalendarComponents;
 using Microsoft.Graph;
 using Microsoft.Identity.Client;
+using System.Net.Http.Headers;
 
 namespace YourNamespace.Helpers
 {
@@ -12,40 +13,41 @@ namespace YourNamespace.Helpers
     {
         private static GraphServiceClient _graphClient;
 
-        /// <summary>
-        /// Initialize Microsoft Graph connection (call once, e.g., during startup)
-        /// </summary>
-        public static void InitializeGraph(string clientId, string tenantId, string clientSecret)
+        // ✅ Initializes the Graph client using token-based authentication (works in .NET 8)
+        public static async Task InitializeGraphAsync(string clientId, string tenantId, string clientSecret)
         {
-            if (_graphClient != null) return;
-
+            // 1️⃣ Acquire a token from Azure AD using MSAL
             var app = ConfidentialClientApplicationBuilder
                 .Create(clientId)
                 .WithTenantId(tenantId)
                 .WithClientSecret(clientSecret)
                 .Build();
 
-            var authProvider = new Microsoft.Graph.Auth.ClientCredentialProvider(app);
-            _graphClient = new GraphServiceClient(authProvider);
+            string[] scopes = new[] { "https://graph.microsoft.com/.default" };
+            var result = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+            string token = result.AccessToken;
+
+            // 2️⃣ Create a GraphServiceClient using that token
+            _graphClient = new GraphServiceClient(new DelegateAuthenticationProvider(
+                (request) =>
+                {
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    return Task.CompletedTask;
+                }));
         }
 
-        /// <summary>
-        /// Adds an iCal.Net CalendarEvent to Outlook calendar via Microsoft Graph.
-        /// </summary>
+        // ✅ Adds an iCal.Net CalendarEvent directly to Outlook via Microsoft Graph
         public static async Task AddEventAsync(CalendarEvent currentEvent, string targetUserEmail)
         {
             if (_graphClient == null)
-                throw new InvalidOperationException("Graph client not initialized. Call InitializeGraph() first.");
+                throw new InvalidOperationException("Graph client not initialized. Call InitializeGraphAsync() first.");
 
             if (currentEvent == null)
                 throw new ArgumentNullException(nameof(currentEvent));
 
-            // 1️⃣ Convert iCal.Net event → Graph event
             var startUtc = currentEvent.DtStart?.AsUtc ?? DateTime.UtcNow;
             var endUtc = currentEvent.DtEnd?.AsUtc ??
-                         (currentEvent.Duration != TimeSpan.Zero
-                            ? startUtc + currentEvent.Duration
-                            : startUtc.AddHours(1));
+                         (currentEvent.Duration != TimeSpan.Zero ? startUtc + currentEvent.Duration : startUtc.AddHours(1));
 
             var attendees = new List<Attendee>();
             if (currentEvent.Attendees != null)
@@ -71,7 +73,6 @@ namespace YourNamespace.Helpers
                 }
             }
 
-            // 2️⃣ Create Graph event
             var graphEvent = new Event
             {
                 Subject = currentEvent.Summary ?? "(No Subject)",
@@ -95,7 +96,6 @@ namespace YourNamespace.Helpers
                 IsOnlineMeeting = false
             };
 
-            // 3️⃣ Add to Outlook Calendar
             await _graphClient.Users[targetUserEmail].Events.Request().AddAsync(graphEvent);
         }
     }
